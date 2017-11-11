@@ -3,7 +3,7 @@ from __future__ import print_function
 
 import argparse
 from datetime import datetime
-from model_KVMemNet import KVMemNet, add_gradient_noise
+from model_KVMemNet import KVMemNet
 from torch import optim
 from visdom import Visdom
 from helper import use_cuda, vectorize_data, load_task, Dataset
@@ -18,7 +18,7 @@ EXP_NAME = "exp-{}".format(datetime.now())
 
 def __pars_args__():
     parser = argparse.ArgumentParser(description='KV_MemNet')
-    parser.add_argument('--seed', type=int, default=1, help='random seed (default: 1)')
+    parser.add_argument('--seed', type=int, default=905, help='random seed (default: 1)')
 
     parser.add_argument('--task_id', type=int, default=20, help="Task to execute.")
     parser.add_argument("--data_dir", type=str, default="dataset/en-10k/", help="Directory containing bAbI tasks")
@@ -28,13 +28,13 @@ def __pars_args__():
     parser.add_argument('-l2', '--l2_lambda', type=float, default=0.1, help='Lambda for l2 loss.')
     parser.add_argument('--max_grad_norm', type=float, default=20.0, help="Clip gradients to this norm.")
     parser.add_argument('--keep_prob', type=float, default=1., help="Keep probability for dropout.")
-    parser.add_argument("--evaluation_interval", type=int, default=50, help="Evaluate and print results every x epochs")
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training.')
-    parser.add_argument('--feature_size', type=int, default=40, help='Feature size.')
+    parser.add_argument("--evaluation_interval", type=int, default=40, help="Evaluate and print results every x epochs")
+    parser.add_argument('--batch_size', type=int, default=50, help='Batch size for training.')
+    parser.add_argument('--feature_size', type=int, default=50, help='Feature size.')
     parser.add_argument('--hops', type=int, default=3, help='Number of hops in the Memory Network.')
-    parser.add_argument('--epochs', type=int, default=100, help="Number of epochs to train for.")
-    parser.add_argument('--embedding_size', type=int, default=30, help="Embedding size for embedding matrices.")
-    parser.add_argument('--memory_size', type=int, default=20, help="Maximum size of memory.")
+    parser.add_argument('--epochs', type=int, default=200, help="Number of epochs to train for.")
+    parser.add_argument('--embedding_size', type=int, default=40, help="Embedding size for embedding matrices.")
+    parser.add_argument('--memory_size', type=int, default=50, help="Maximum size of memory.")
     parser.add_argument('-lr', '--learning_rate', type=float, default=0.001, help='learning rate (default: 0.001)')
     parser.add_argument('--train', default=True, help='if we want to update the master weights')
     return parser.parse_args()
@@ -83,7 +83,9 @@ if __name__ == '__main__':
     train, test = load_task(args.data_dir, args.task_id)
     vocab, word_idx, vocab_size, memory_size, sentence_size, query_size, dataset = __dataset_preparation__(args, train, test)
 
-    vis = Visdom()
+    viz = Visdom()
+    assert viz.check_connection()
+
     model = KVMemNet(batch_size=args.batch_size,
                      embedding_size=args.embedding_size,
                      memory_size=memory_size,
@@ -97,5 +99,5 @@ if __name__ == '__main__':
     if use_cuda:
         model.cuda()
 
-    optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, eps=args.epsilon)
-    work(model, dataset, args, vis, EXP_NAME, optimizer)
+    optimizer = optim.Adadelta(model.parameters(), lr=args.learning_rate, eps=args.epsilon)
+    work(model, dataset, args, viz, EXP_NAME, optimizer)

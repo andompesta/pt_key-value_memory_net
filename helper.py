@@ -144,38 +144,36 @@ def ensure_dir(file_path):
 
 
 
-class SumLinear(nn.Module):
-    r"""Applies a sum transformation to the incoming data: :math:`y = x + A`
+class AttrProxy(object):
+    """Translates index lookups into attribute lookups."""
+    def __init__(self, module, prefix):
+        self.module = module
+        self.prefix = prefix
 
-    Args:
-        in_features: size of each input sample
-        out_features: size of each output sample
-    Shape:
-        - Input: :math:`(N, *, in\_features)` where `*` means any number of
-          additional dimensions
-        - Output: :math:`(N, *, out\_features)` where all but the last dimension
-          are the same shape as the input.
+    def __getitem__(self, i):
+        return getattr(self.module, self.prefix + str(i))
 
-    Attributes:
-        weight: the learnable weights of the module of shape
-            (out_features x in_features)
+
+def add_gradient_noise(t, stddev=1e-3):
     """
+    Adds gradient noise as described in http://arxiv.org/abs/1511.06807 [2].
+    The input Tensor `t` should be a gradient.
+    The output will be `t` + gaussian noise.
+    0.001 was said to be a good fixed value for memory networks [2].
+    """
+    gn = torch.normal(means=torch.zeros(t.data.shape), std=torch.Tensor(t.data.shape).fill_(stddev))
+    t.grad.data += gn
+    return t
 
-    def __init__(self, in_features, out_features):
-        super(Linear, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
-        self.reset_parameters()
 
-    def reset_parameters(self):
-        stdv = 1. / math.sqrt(self.weight.size(1))
-        self.weight.data.uniform_(-stdv, stdv)
+def exp_lr_scheduler(optimizer, epoch, init_lr=0.001, lr_decay_epoch=20):
+    """Decay learning rate by a factor of 0.1 every lr_decay_epoch epochs."""
+    lr = init_lr * (0.1**(epoch // lr_decay_epoch))
 
-    def forward(self, input):
-        return input + self.weight
+    if epoch % lr_decay_epoch == 0:
+        print('LR is set to {}'.format(lr))
 
-    def __repr__(self):
-        return self.__class__.__name__ + '(' \
-            + 'in_features=' + str(self.in_features) \
-            + ', out_features=' + str(self.out_features) + ')'
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+    return optimizer

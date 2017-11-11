@@ -3,13 +3,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
-from helper import TENSOR_TYPE
+from helper import TENSOR_TYPE, AttrProxy
 import math
 
-
-def xavier_init(m):
-    n = sum(m.data.shape)
-    m.data.normal_(1.0, math.sqrt(2. / n))
 
 def position_encoding(sentence_size, embedding_size):
     """
@@ -24,26 +20,6 @@ def position_encoding(sentence_size, embedding_size):
     encoding = 1 + 4 * encoding / embedding_size / sentence_size
     return torch.t(encoding)
 
-
-def add_gradient_noise(t, stddev=1e-3):
-    """
-    Adds gradient noise as described in http://arxiv.org/abs/1511.06807 [2].
-    The input Tensor `t` should be a gradient.
-    The output will be `t` + gaussian noise.
-    0.001 was said to be a good fixed value for memory networks [2].
-    """
-    gn = np.random.normal(scale=stddev, size=t.shape)
-    t += gn
-    return t
-
-def zero_nil_slot(t):
-    """
-    Overwrites the nil_slot (first row) of the input Tensor with zeros.
-    The nil_slot is a dummy slot and should not be trained and influence
-    the training algorithm.
-    """
-    t[np.isnan(t)] = 0
-    return t
 
 class KVMemNet(nn.Module):
     def __init__(self,  batch_size, embedding_size, memory_size, vocab_size, story_size, query_size,
@@ -65,7 +41,7 @@ class KVMemNet(nn.Module):
         self.query_size = query_size
         self.feature_size = feature_size
         self.l2_lambda = l2_lambda
-        self.encoding = position_encoding(self.story_size, self.embedding_size)
+        self.encoding = Variable(position_encoding(self.story_size, self.embedding_size), requires_grad=False, volatile=False)
         self.keep_prob = keep_prob
         self.hops = hops
 
@@ -76,42 +52,37 @@ class KVMemNet(nn.Module):
 
         self.W = nn.Embedding(self.vocab_size, self.embedding_size, padding_idx=0)
         self.W_memory = nn.Embedding(self.vocab_size, self.embedding_size, padding_idx=0)
+        self.Rs = nn.ParameterList([nn.Parameter(TENSOR_TYPE['f_tensor'](self.feature_size, self.feature_size)) for _ in range(self.hops)])
 
-        self.Rs = []
-        for _ in range(self.hops):
-            # define R for variables
-            R = nn.Parameter(TENSOR_TYPE['f_tensor'](self.feature_size, self.feature_size))
-            self.Rs.append(R)
         self._loss = nn.CrossEntropyLoss()
         self.reset_parameters()
 
     def reset_parameters(self):
-        xavier_init(self.A)
-        xavier_init(self.TK)
-        xavier_init(self.TV)
-        for R in self.Rs:
-            xavier_init(R)
+        for p in self.parameters():
+            nn.init.xavier_uniform(p)
 
     def forward(self, memory_key, memory_value, query, labels):
 
         memory_key = Variable(torch.from_numpy(memory_key))
         memory_value = Variable(torch.from_numpy(memory_value))
         query = Variable(torch.from_numpy(query))
-        labels = Variable(torch.from_numpy(labels), requires_grad=False)
+        labels = Variable(torch.from_numpy(labels))
 
         embedded_chars = self.W(query)                                # shape: [batch_size, query_size, embedding_size]
-        #TODO: need to adjust the embedding, flat it out and recompose the sentence
-        mkeys_embedded_chars = self.W_memory(memory_key)              # shape: [batch_size, memory_size, story_size, embedding_size]
-        mvalues_embedded_chars = self.W_memory(memory_value)          # shape: [batch_size, memory_size, story_size, embedding_size]
 
+        memory_shape = memory_key.data.shape
+        mkeys_embedded_chars = self.W_memory(memory_key.view(memory_shape[:-2] + torch.Size([-1])))              # shape: [batch_size, memory_size, story_size, embedding_size]
+        mvalues_embedded_chars = self.W_memory(memory_value.view(memory_shape[:-2] + torch.Size([-1])))          # shape: [batch_size, memory_size, story_size, embedding_size]
+        mkeys_embedded_chars = mkeys_embedded_chars.view(memory_shape + torch.Size([-1]))
+        mvalues_embedded_chars = mvalues_embedded_chars.view(memory_shape + torch.Size([-1]))
 
-        q_r = torch.sum((embedded_chars.data * self.encoding), dim=1)
-        doc_r = torch.sum((mkeys_embedded_chars.data * self.encoding), dim=2)
-        value_r = torch.sum((mvalues_embedded_chars.data * self.encoding), dim=2)
+        q_r = torch.sum((embedded_chars * self.encoding), dim=1)
+        doc_r = torch.sum((mkeys_embedded_chars * self.encoding), dim=2)
+        value_r = torch.sum((mvalues_embedded_chars * self.encoding), dim=2)
         o = self.__forward_loop__(doc_r, value_r, q_r)
         o = torch.t(o).contiguous()
 
-        y_tmp = torch.mm(self.A, torch.t(self.W_memory))
+        y_tmp = torch.mm(self.A, torch.t(self.W_memory.weight))
         logits = torch.mm(o, y_tmp)  # + logits_bias
         probs = F.softmax(logits)
 
@@ -130,19 +101,17 @@ class KVMemNet(nn.Module):
         """
         u = torch.mm(self.A, torch.t(questions))                    # [feature_size, batch_size]
         u = [u]
-        for _ in range(self.hops):
-            R = self.Rs[_]
+        for _, R in enumerate(self.Rs):
             u_temp = u[-1]
             mk_temp = mkeys + self.TK                                                                   # [batch_size,  memory_size, embedding_size]
             k_temp = mk_temp.permute(2, 0, 1).contiguous().view(self.embedding_size, -1)                # [embedding_size, batch_size * memory_size]
             a_k_temp = torch.mm(self.A, k_temp)                                                         # [feature_size, batch_size x memory_size]
             a_k = torch.t(a_k_temp).contiguous().view(-1, self.memory_size, self.feature_size)          # [batch_size, memory_size, feature_size]
             u_expanded = torch.t(u_temp).contiguous().unsqueeze(dim=1)                                  # [batch_size, 1, feature_size]
-            # TODO: check if the element-wise operation is correctly broadcast
             dotted = torch.sum((a_k * u_expanded), dim=2)                                               # [batch_size, memory_size]
 
             # Calculate probabilities
-            probs = F.softmax(dotted, dim=-1)                                                           # [batch_size, memory_size]
+            probs = F.softmax(dotted)                                                           # [batch_size, memory_size]
             probs_expand = probs.unsqueeze(dim=-1)                                                      # [batch_size, memory_size, 1]
             mv_temp = mvalues + self.TV                                                                 # [batch_size,  memory_size, embedding_size]
             v_temp = mv_temp.permute(2, 0, 1).contiguous().view(self.embedding_size, -1)                # [embedding_size, batch_size x memory_size]
